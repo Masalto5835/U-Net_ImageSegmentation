@@ -1,0 +1,15 @@
+# 深度学习核心依赖
+torch==2.6.0+cu124         # PyTorch深度学习框架，CUDA 12.4版本
+torchvision==0.21.0+cu124  # 计算机视觉工具库，与PyTorch版本匹配
+
+# 图像处理依赖
+Pillow>=10.1.0             # Python图像处理库
+opencv-python>=4.8.1.28    # OpenCV计算机视觉库
+
+# 数据处理与数值计算
+numpy>=1.26.0              # 科学计算库
+scikit-learn>=1.3.0        # 机器学习算法库
+
+# 可视化与工具
+matplotlib>=3.8.0          # 数据可视化库
+tqdm==4.66.3               # 进度条显示库
