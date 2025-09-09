@@ -88,6 +88,11 @@ self.lr         = 0.001 # 学习率
 ```
 
 ## 技术细节
+### 损失曲线
+![损失曲线](training_metrics.png)
+
+### 示例验证
+![示例验证](segmentation_visualization.png)
 
 ### 核心依赖
 

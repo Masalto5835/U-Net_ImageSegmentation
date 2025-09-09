@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 from matplotlib.font_manager import FontProperties
 from matplotlib.colors import ListedColormap
 from config import Config
+
 config = Config()
 
 # 定义Dice损失函数
@@ -23,26 +24,43 @@ class DiceLoss(nn.Module):
         self.weight = weight
 
     def forward(self, inputs, targets, smooth=1):
+        # 应用softmax获取类别概率
         inputs = F.softmax(inputs, dim=1)
-        inputs = inputs.permute(0, 2, 3, 1).contiguous()
-        targets = targets.contiguous()
+
+        # 确保targets是与inputs在同一设备上的长整型张量
+        if targets.dtype != torch.long:
+            targets = targets.long()
+        if inputs.device != targets.device:
+            targets = targets.to(inputs.device)
+
         class_dice = []
         weights = []
-        for cls in torch.unique(targets):
-            inputs_cls = inputs[..., cls]  # 修复维度访问错误
+
+        # 获取唯一的类别并确保按顺序处理
+        unique_classes = torch.unique(targets)
+        for cls in unique_classes:
+            # 获取当前类别的预测概率
+            inputs_cls = inputs[:, cls, :, :]
+            # 创建当前类别的目标掩码
             targets_cls = (targets == cls).float()
+
+            # 计算交集和并集（考虑平滑因子）
             intersection = (inputs_cls * targets_cls).sum()
             dice = (2. * intersection + smooth) / (inputs_cls.sum() + targets_cls.sum() + smooth)
             class_dice.append(dice)
+
+            # 如果提供了权重，则添加相应的权重
             if self.weight is not None:
                 weights.append(self.weight[cls])
 
         if self.weight is not None and len(weights) > 0:
+            # 将权重转换为与输入相同的设备
             weights = torch.tensor(weights, device=inputs.device)
-            # 使用原始权重比例而非归一化
+            # 使用权重计算加权平均Dice系数
             return 1 - torch.mean(torch.stack(class_dice) * weights)
         else:
-            return 1 - torch.mean(torch.stack(class_dice)) if class_dice else torch.tensor(1.0)  # 无类别时返回1.0使损失为0
+            # 计算未加权的平均Dice系数
+            return 1 - torch.mean(torch.stack(class_dice)) if class_dice else torch.tensor(1.0, device=inputs.device)
 
 # 自定义数据集类，用于加载本地图像和掩码
 class SegmentationDataset(Dataset):
@@ -96,14 +114,14 @@ class SegmentationDataset(Dataset):
 def get_transforms(img_size=256):
     train_transform = transforms.Compose([
         transforms.Resize((img_size, img_size)),
-        transforms.RandomResizedCrop(img_size, scale=(0.8, 1.0)),  # 扩大裁剪范围增加多样性
-        transforms.RandomHorizontalFlip(),
-        transforms.RandomVerticalFlip(),
-        transforms.RandomRotation(15),  # 增加旋转角度范围
-        transforms.RandomAffine(degrees=0, shear=10),  # 添加剪切变换
-        transforms.RandomPerspective(distortion_scale=0.2, p=0.5),  # 添加透视变换
-        transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),  # 增强颜色抖动
-        transforms.RandomGrayscale(p=0.3),
+        # transforms.RandomResizedCrop(img_size, scale=(0.8, 1.0)),  # 扩大裁剪范围增加多样性
+        # transforms.RandomHorizontalFlip(),
+        # transforms.RandomVerticalFlip(),
+        transforms.RandomRotation(5),  # 增加旋转角度范围
+        # transforms.RandomAffine(degrees=0, shear=10),  # 添加剪切变换
+        # transforms.RandomPerspective(distortion_scale=0.2, p=0.5),  # 添加透视变换
+        # transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.2),  # 增强颜色抖动
+        # transforms.RandomGrayscale(p=0.3),
         transforms.ToTensor(),
         transforms.RandomErasing(p=0.2, scale=(0.02, 0.33)),  # 增加随机擦除概率和范围
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
@@ -265,7 +283,13 @@ def compute_class_weights(dataset, num_classes=3):
 # 计算mIoU指标
 def compute_miou(preds, targets, num_classes=3):
     ious = []
-    preds = F.softmax(preds, dim=1).argmax(dim=1)
+    # 直接对输出应用argmax获取预测类别
+    # 注意：不在这里应用softmax，因为交叉熵损失函数已经处理了这部分
+    preds = torch.argmax(preds, dim=1)
+
+    # 确保preds和targets在同一设备上
+    if preds.device != targets.device:
+        targets = targets.to(preds.device)
 
     for cls in range(num_classes):
         pred_mask = (preds == cls)
@@ -275,14 +299,16 @@ def compute_miou(preds, targets, num_classes=3):
         union = (pred_mask | target_mask).sum().float()
 
         if union == 0:
-            ious.append(torch.tensor(1.0) if intersection == 0 else torch.tensor(0.0))
+            ious.append(
+                torch.tensor(1.0, device=preds.device) if intersection == 0 else torch.tensor(0.0, device=preds.device))
         else:
             ious.append((intersection + 1e-6) / (union + 1e-6))
 
-    return torch.mean(torch.stack(ious)) if ious else torch.tensor(0.)
+    return torch.mean(torch.stack(ious)) if ious else torch.tensor(0., device=preds.device)
 
 # 训练模型
-def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, device='cuda', patience=config.patience, min_delta=config.min_delta,):
+def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, device='cuda', patience=config.patience,
+                min_delta=config.min_delta, ):
     # 计算类别权重
     WEIGHTS_FILE = "class_weights.json"
 
@@ -305,11 +331,13 @@ def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, devic
     # 添加标签平滑以减少过拟合
     criterion_ce = nn.CrossEntropyLoss(weight=class_weights.to(device), label_smoothing=0.1)
     criterion_dice = DiceLoss(weight=class_weights.to(device))
+
     def combined_loss(inputs, targets, alpha=0.5):
         ce_loss = criterion_ce(inputs, targets)
         dice_loss = criterion_dice(inputs, targets)
         # 加权组合损失函数，alpha控制交叉熵损失权重
         return alpha * ce_loss + (1 - alpha) * dice_loss
+
     criterion = combined_loss
     optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-5)
     scaler = torch.amp.GradScaler('cuda')
@@ -335,7 +363,7 @@ def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, devic
         train_loss = 0.0
 
         # 创建进度条对象，添加动态loss显示，并设置较长的进度条宽度
-        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{num_epochs} 训练", total=len(train_loader), ncols=150)
+        train_pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{num_epochs} 训练", total=len(train_loader), ncols=150)
 
         for batch_idx, (images, masks) in enumerate(train_pbar):
             # 将数据移至指定设备
@@ -369,7 +397,8 @@ def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, devic
         total_miou = 0.0
 
         with torch.no_grad():
-            for images, masks in tqdm(test_loader, desc=f"Epoch {epoch+1}/{num_epochs} 测试", total=len(test_loader), ncols=150):
+            for images, masks in tqdm(test_loader, desc=f"Epoch {epoch + 1}/{num_epochs} 测试", total=len(test_loader),
+                                      ncols=150):
                 images, masks = images.to(device), masks.to(device)
                 outputs = model(images)
                 loss = criterion(outputs, masks)
@@ -388,7 +417,8 @@ def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, devic
         test_mious.append(avg_miou)
 
         # 打印训练进度
-        print(f'Epoch {epoch+1}/{num_epochs}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}, Test mIoU: {avg_miou:.4f}')
+        print(
+            f'Epoch {epoch + 1}/{num_epochs}, Train Loss: {train_loss:.4f}, Test Loss: {test_loss:.4f}, Test mIoU: {avg_miou:.4f}')
         prev_lr = optimizer.param_groups[0]['lr']
         scheduler.step(test_loss)
         current_lr = scheduler.get_last_lr()[0]
@@ -405,7 +435,7 @@ def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, devic
             early_stop_counter += 1
             print(f"早停计数 {early_stop_counter}/{patience} ")
             if early_stop_counter >= patience:
-                print(f"早停触发！在第 {epoch+1} 轮停止训练")
+                print(f"早停触发！在第 {epoch + 1} 轮停止训练")
                 break
 
         # 每5个epoch打印学习率
@@ -421,8 +451,8 @@ def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, devic
 
     # 损失曲线
     plt.subplot(1, 2, 1)
-    plt.plot(range(1, len(train_losses)+1), train_losses, label='Train Loss')
-    plt.plot(range(1, len(test_losses)+1), test_losses, label='Test Loss')
+    plt.plot(range(1, len(train_losses) + 1), train_losses, label='Train Loss')
+    plt.plot(range(1, len(test_losses) + 1), test_losses, label='Test Loss')
     plt.xlabel('Epoch')
     plt.ylabel('Loss')
     plt.title('Training and Test Loss')
@@ -430,7 +460,7 @@ def train_model(model, train_loader, test_loader, num_epochs=50, lr=0.001, devic
 
     # mIoU曲线
     plt.subplot(1, 2, 2)
-    plt.plot(range(1, len(test_mious)+1), test_mious, label='Test mIoU')
+    plt.plot(range(1, len(test_mious) + 1), test_mious, label='Test mIoU')
     plt.xlabel('Epoch')
     plt.ylabel('mIoU')
     plt.title('Test Mean Intersection over Union')
