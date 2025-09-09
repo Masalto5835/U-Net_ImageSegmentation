@@ -1,7 +1,4 @@
-import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import sys
 import os
 from contextlib import redirect_stdout
 
@@ -13,20 +10,20 @@ class AttentionGate(nn.Module):
             nn.Conv2d(F_g, F_int, kernel_size=1, stride=1, padding=0),
             nn.BatchNorm2d(F_int)
         )
-        
+
         self.W_x = nn.Sequential(
             nn.Conv2d(F_l, F_int, kernel_size=1, stride=1, padding=0),
             nn.BatchNorm2d(F_int)
         )
-        
+
         self.psi = nn.Sequential(
             nn.Conv2d(F_int, 1, kernel_size=1, stride=1, padding=0),
             nn.BatchNorm2d(1),
             nn.Sigmoid()
         )
-        
+
         self.relu = nn.ReLU(inplace=True)
-    
+
     def forward(self, g, x):
         g1 = self.W_g(g)
         x1 = self.W_x(x)
@@ -72,31 +69,49 @@ class UNet(nn.Module):
 
         # 池化层
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
-        
-        # 保存模型结构到本地文件
-        structure_file = 'model_structure.txt'
-        with open(structure_file, 'w') as f:
-            with redirect_stdout(f):
-                print(self)
-        print(f"模型结构已保存到 {os.path.abspath(structure_file)}")
+
+    # 添加一个方法来保存模型结构，而不是在构造函数中直接保存
+    def save_structure(self, file_path='model_structure.txt'):
+        try:
+            with open(file_path, 'w') as f:
+                with redirect_stdout(f):
+                    print(self)
+            print(f"模型结构已保存到 {os.path.abspath(file_path)}")
+            return True
+        except Exception as e:
+            print(f"保存模型结构时出错: {e}")
+            return False
 
     def conv_block(self, in_channels, out_channels, use_residual=True):
-        layers = [
+        # 主路径
+        main_path = [
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=False),
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(out_channels)
         ]
-        
-        # 添加残差连接
-        if use_residual and in_channels == out_channels:
-            layers.append(nn.Identity())
-            return nn.Sequential(*layers)
-        
-        layers.append(nn.ReLU(inplace=True))
-        return nn.Sequential(*layers)
-    
+
+        main_path = nn.Sequential(*main_path)
+
+        # 残差连接路径
+        if use_residual:
+            if in_channels != out_channels:
+                # 如果通道数不同，使用1x1卷积调整通道数
+                shortcut = nn.Sequential(
+                    nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0),
+                    nn.BatchNorm2d(out_channels)
+                )
+            else:
+                # 如果通道数相同，直接使用恒等映射
+                shortcut = nn.Identity()
+
+            # 创建带残差连接的自定义模块
+            return ResidualBlock(main_path, shortcut)
+
+        # 如果不使用残差连接，添加ReLU并返回主路径
+        return nn.Sequential(main_path, nn.ReLU(inplace=True))
+
     def forward(self, x):
         # 下采样
         enc1 = self.encoder1(x)
@@ -132,3 +147,54 @@ class UNet(nn.Module):
         # 输出
         out = self.outconv(dec1)
         return out
+
+# 自定义残差块模块
+class ResidualBlock(nn.Module):
+    def __init__(self, main_path, shortcut):
+        super(ResidualBlock, self).__init__()
+        self.main_path = main_path
+        self.shortcut = shortcut
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x):
+        residual = self.shortcut(x)
+        out = self.main_path(x)
+        out += residual  # 残差连接
+        out = self.relu(out)
+        return out
+
+
+# 测试前向传播是否正常
+if __name__ == "__main__":
+    import torch
+
+    # 设置随机种子以确保结果可复现
+    torch.manual_seed(42)
+
+    # 创建测试输入 (batch_size=1, channels=3, height=256, width=256)
+    test_input = torch.randn(1, 3, 256, 256)
+
+    # 创建模型实例
+    model = UNet(in_channels=3, out_channels=3)
+
+    # 移动到可用设备
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model.to(device)
+    test_input = test_input.to(device)
+
+    try:
+        # 执行前向传播
+        with torch.no_grad():
+            output = model(test_input)
+
+        # 检查输出形状
+        assert output.shape == (1, 3, 256, 256), f"前向传播输出形状错误: {output.shape}，期望 (1, 3, 256, 256)"
+
+        # 检查输出是否包含NaN或无穷大值
+        assert not torch.isnan(output).any(), "前向传播输出包含NaN值"
+        assert not torch.isinf(output).any(), "前向传播输出包含无穷大值"
+
+        print(f"前向传播测试成功! 输入形状: {test_input.shape}, 输出形状: {output.shape}")
+        print(f"使用设备: {device}")
+    except Exception as e:
+        print(f"前向传播测试失败: {str(e)}")

@@ -24,7 +24,7 @@ def main():
 
     # 检查是否有可用的GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'设备信息: {device}, CUDA可用: {torch.cuda.is_available()}, 设备数量: {torch.cuda.device_count()}, 可用显存: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB')
+    print(f'设备信息: {device}, CUDA可用: {torch.cuda.is_available()}, 设备数量: {torch.cuda.device_count()}, 可用显存: {torch.cuda.get_device_properties(0).total_memory / 1024 ** 3:.2f} GB')
 
     # 检查数据目录是否存在
     if not os.path.exists(image_dir) or not os.path.exists(mask_dir):
@@ -61,16 +61,19 @@ def main():
     # 创建模型
     print('构建模型...')
     model = UNet(in_channels=3, out_channels=3)
-    
+
+    # 保存模型结构
+    model.save_structure()
+
     # 训练模型
     print('训练模型...')
     model = train_model(model, train_loader, test_loader, config.num_epochs, config.lr, device)
-    
+
     # 保存模型
     torch.save(model.state_dict(), 'unet_segmentation_model.pth')
     print('最佳模型已保存为 best_model.pth')
     print('最终模型已保存为 unet_segmentation_model.pth')
-    
+
 
 if __name__ == '__main__':
     main()
